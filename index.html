@@ -7,6 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="七期停車">
+<link rel="manifest" href="manifest.webmanifest">
 <title>七期停車</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang TC","Noto Sans TC",sans-serif;color:#111;background:#f4f4f6}
@@ -39,150 +40,118 @@ h1{font-size:38px;line-height:1.1;margin:0 0 30px 4px;font-weight:800;letter-spa
 
   <div class="meta" id="meta">正在更新資料…</div>
   <button class="btn" id="refresh" type="button">重新整理 / 更新資料</button>
-  <div class="note">顯示汽車剩餘車位。公開資料可能與現場有短暫落差。</div>
+  <div class="note">顯示汽車剩餘車位；資料來自交通部 TDX，可能與現場有短暫落差。</div>
 </main>
 
 <script>
 const LOTS = [
-  { id: 'huixin', key: '西屯區-交通局-惠新P' },
-  { id: 'huian', key: '西屯區-交通局-惠安P' },
-  { id: 'chaofu', key: '西屯區-交通局-朝富P' }
+  { id: 'huixin', name: '西屯區-交通局-惠新P' },
+  { id: 'huian', name: '西屯區-交通局-惠安P' },
+  { id: 'chaofu', name: '西屯區-交通局-朝富P' }
 ];
 
+const TDX = 'https://tdx.transportdata.tw/api/basic/v1/Parking/OffStreet/ParkingAvailability/City/Taichung?$format=JSON';
+const READER = 'https://r.jina.ai/' + TDX;
 const $ = id => document.getElementById(id);
-const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-function parseLot(text, key) {
-  const normalized = String(text).replace(/\r/g, '');
-  const exact = new RegExp('(\\d+|以現場為準)\\s*\\/\\s*(\\d+)\\s*\\|\\s*停車場(?:\\s*\\([^)]*\\))?\\s*\\|\\s*' + esc(key));
-  let m = normalized.match(exact);
-  if (m) return { free: m[1], total: m[2] };
-
-  const pos = normalized.indexOf(key);
-  if (pos < 0) return null;
-  const before = normalized.slice(Math.max(0, pos - 300), pos);
-  const matches = [...before.matchAll(/(\\d+|以現場為準)\\s*\\/\\s*(\\d+)/g)];
-  if (!matches.length) return null;
-  const last = matches[matches.length - 1];
-  return { free: last[1], total: last[2] };
+function extractJson(text){
+  let start = text.indexOf('{"UpdateTime"');
+  if(start < 0) start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if(start < 0 || end <= start) throw new Error('資料格式錯誤');
+  return JSON.parse(text.slice(start,end+1));
 }
 
-async function fetchText(url, timeoutMs = 12000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, {
-      cache: 'no-store',
-      signal: controller.signal,
-      headers: { 'Accept': 'text/plain,text/html,*/*' }
-    });
-    if (!response.ok) throw new Error('HTTP ' + response.status);
-    return await response.text();
-  } finally {
-    clearTimeout(timer);
+function carSpaces(p){
+  const car = (p.Availabilities || []).find(x => Number(x.SpaceType) === 1);
+  const value = car ? car.AvailableSpaces : p.AvailableSpaces;
+  const n = Number(value);
+  if(!Number.isFinite(n)) throw new Error('找不到汽車剩餘車位');
+  return n;
+}
+
+async function getLiveData(){
+  const response = await fetch(READER, {
+    method:'GET',
+    cache:'no-store',
+    headers:{'Accept':'text/plain'}
+  });
+  if(!response.ok) throw new Error('資料連線失敗 ' + response.status);
+  const text = await response.text();
+  const data = extractJson(text);
+  if(!Array.isArray(data.ParkingAvailabilities)) throw new Error('找不到停車資料');
+
+  const values = {};
+  for(const lot of LOTS){
+    const p = data.ParkingAvailabilities.find(x => x?.CarParkName?.Zh_tw === lot.name);
+    if(!p) throw new Error('找不到 ' + lot.name);
+    values[lot.id] = carSpaces(p);
+  }
+  return { values, updateTime:data.UpdateTime || null };
+}
+
+function saveCache(result){
+  try{ localStorage.setItem('parking-cache',JSON.stringify({savedAt:Date.now(),...result})); }catch(_){}
+}
+function readCache(){
+  try{ return JSON.parse(localStorage.getItem('parking-cache')); }catch(_){ return null; }
+}
+function showValues(values){
+  for(const lot of LOTS){
+    const el=$(lot.id);
+    el.classList.remove('loading');
+    el.textContent = values[lot.id] + ' 格';
   }
 }
-
-async function getLiveData() {
-  const stamp = Date.now();
-  const target = 'https://parkboss.tw/map?_=' + stamp;
-  const sources = [
-    target,
-    'https://r.jina.ai/http://parkboss.tw/map?_=' + stamp,
-    'https://r.jina.ai/https://parkboss.tw/map?_=' + stamp,
-    'https://api.allorigins.win/raw?url=' + encodeURIComponent(target)
-  ];
-
-  let lastError = null;
-  for (const source of sources) {
-    try {
-      const text = await fetchText(source);
-      const values = LOTS.map(lot => parseLot(text, lot.key));
-      if (values.every(Boolean)) return values;
-      throw new Error('回傳內容找不到指定停車場');
-    } catch (err) {
-      lastError = err;
-    }
-  }
-  throw lastError || new Error('無法取得即時資料');
-}
-
-function saveCache(values) {
-  try {
-    localStorage.setItem('parking-cache', JSON.stringify({
-      at: Date.now(),
-      values
-    }));
-  } catch (_) {}
-}
-
-function readCache() {
-  try {
-    const x = JSON.parse(localStorage.getItem('parking-cache'));
-    if (!x || !Array.isArray(x.values) || x.values.length !== 3) return null;
-    return x;
-  } catch (_) {
-    return null;
-  }
-}
-
-function setValue(id, value) {
-  const el = $(id);
-  el.classList.remove('loading');
-  el.textContent = value.free === '以現場為準' ? '以現場為準' : value.free + ' 格';
-}
-
-function setLoading() {
-  LOTS.forEach(lot => {
-    const el = $(lot.id);
+function setLoading(){
+  for(const lot of LOTS){
+    const el=$(lot.id);
     el.classList.add('loading');
-    el.textContent = '讀取中…';
-  });
+    el.textContent='讀取中…';
+  }
+}
+function formatSourceTime(iso){
+  if(!iso) return new Date().toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});
+  const d=new Date(iso);
+  if(Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'});
 }
 
-function formatTime(ms) {
-  return new Date(ms).toLocaleTimeString('zh-TW', {
-    hour: '2-digit',
-    minute: '2-digit'
-  });
-}
-
-async function update() {
-  const btn = $('refresh');
-  btn.disabled = true;
-  btn.textContent = '更新中…';
-  $('meta').className = 'meta';
-  $('meta').textContent = '正在更新資料…';
+async function update(){
+  const btn=$('refresh');
+  btn.disabled=true;
+  btn.textContent='更新中…';
+  $('meta').className='meta';
+  $('meta').textContent='正在更新資料…';
   setLoading();
 
-  try {
-    const values = await getLiveData();
-    LOTS.forEach((lot, i) => setValue(lot.id, values[i]));
-    const now = Date.now();
-    saveCache(values);
-    $('meta').textContent = '更新時間：' + formatTime(now);
-  } catch (err) {
-    const cached = readCache();
-    if (cached) {
-      LOTS.forEach((lot, i) => setValue(lot.id, cached.values[i]));
-      $('meta').className = 'meta error';
-      $('meta').textContent = '即時更新失敗，顯示上次資料（' + formatTime(cached.at) + '）';
-    } else {
-      LOTS.forEach(lot => {
-        const el = $(lot.id);
+  try{
+    const result=await getLiveData();
+    showValues(result.values);
+    saveCache(result);
+    $('meta').textContent='資料時間：' + formatSourceTime(result.updateTime);
+  }catch(err){
+    const cached=readCache();
+    if(cached?.values){
+      showValues(cached.values);
+      $('meta').className='meta error';
+      $('meta').textContent='即時更新失敗，顯示上次資料';
+    }else{
+      for(const lot of LOTS){
+        const el=$(lot.id);
         el.classList.remove('loading');
-        el.textContent = '—';
-      });
-      $('meta').className = 'meta error';
-      $('meta').textContent = '更新失敗，請按一次「重新整理 / 更新資料」';
+        el.textContent='—';
+      }
+      $('meta').className='meta error';
+      $('meta').textContent='更新失敗，請再按一次更新';
     }
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '重新整理 / 更新資料';
+  }finally{
+    btn.disabled=false;
+    btn.textContent='重新整理 / 更新資料';
   }
 }
 
-$('refresh').addEventListener('click', update);
+$('refresh').addEventListener('click',update);
 update();
 </script>
 </body>
