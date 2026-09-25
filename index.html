@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f4f4f6">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="七期停車">
+<title>七期停車</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang TC","Noto Sans TC",sans-serif;color:#111;background:#f4f4f6}
+*{box-sizing:border-box}
+body{margin:0;background:#f4f4f6}
+.wrap{max-width:520px;margin:0 auto;padding:64px 20px 40px}
+h1{font-size:38px;line-height:1.1;margin:0 0 30px 4px;font-weight:800;letter-spacing:-1px}
+.card{background:#fff;border-radius:24px;overflow:hidden;box-shadow:0 7px 24px rgba(0,0,0,.05)}
+.row{min-height:98px;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 26px;border-bottom:1px solid #e7e7ea}
+.row:last-child{border-bottom:0}
+.name{font-size:22px;font-weight:700}
+.count{font-size:25px;font-weight:800;white-space:nowrap}
+.count.loading{font-size:17px;color:#888;font-weight:600}
+.meta{min-height:56px;padding:20px 6px 9px;color:#777;font-size:15px;line-height:1.4}
+.error{color:#b42318}
+.btn{width:100%;border:0;border-radius:18px;background:#111;color:#fff;font-size:19px;font-weight:700;padding:19px 16px;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.btn:disabled{opacity:.55}
+.note{margin:13px 6px 0;color:#999;font-size:12px;line-height:1.45}
+@media(max-width:390px){.wrap{padding-left:14px;padding-right:14px}.row{padding:0 18px}.name{font-size:19px}.count{font-size:22px}}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <h1>七期停車</h1>
+  <section class="card">
+    <div class="row"><div class="name">惠新停車場</div><div class="count loading" id="huixin">讀取中…</div></div>
+    <div class="row"><div class="name">惠安停車場</div><div class="count loading" id="huian">讀取中…</div></div>
+    <div class="row"><div class="name">朝富停車場（tiger）</div><div class="count loading" id="chaofu">讀取中…</div></div>
+  </section>
+
+  <div class="meta" id="meta">正在更新資料…</div>
+  <button class="btn" id="refresh" type="button">重新整理 / 更新資料</button>
+  <div class="note">顯示汽車剩餘車位。公開資料可能與現場有短暫落差。</div>
+</main>
+
+<script>
+const LOTS = [
+  { id: 'huixin', key: '西屯區-交通局-惠新P' },
+  { id: 'huian', key: '西屯區-交通局-惠安P' },
+  { id: 'chaofu', key: '西屯區-交通局-朝富P' }
+];
+
+const $ = id => document.getElementById(id);
+const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function parseLot(text, key) {
+  const normalized = String(text).replace(/\r/g, '');
+  const exact = new RegExp('(\\d+|以現場為準)\\s*\\/\\s*(\\d+)\\s*\\|\\s*停車場(?:\\s*\\([^)]*\\))?\\s*\\|\\s*' + esc(key));
+  let m = normalized.match(exact);
+  if (m) return { free: m[1], total: m[2] };
+
+  const pos = normalized.indexOf(key);
+  if (pos < 0) return null;
+  const before = normalized.slice(Math.max(0, pos - 300), pos);
+  const matches = [...before.matchAll(/(\\d+|以現場為準)\\s*\\/\\s*(\\d+)/g)];
+  if (!matches.length) return null;
+  const last = matches[matches.length - 1];
+  return { free: last[1], total: last[2] };
+}
+
+async function fetchText(url, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: { 'Accept': 'text/plain,text/html,*/*' }
+    });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    return await response.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getLiveData() {
+  const stamp = Date.now();
+  const target = 'https://parkboss.tw/map?_=' + stamp;
+  const sources = [
+    target,
+    'https://r.jina.ai/http://parkboss.tw/map?_=' + stamp,
+    'https://r.jina.ai/https://parkboss.tw/map?_=' + stamp,
+    'https://api.allorigins.win/raw?url=' + encodeURIComponent(target)
+  ];
+
+  let lastError = null;
+  for (const source of sources) {
+    try {
+      const text = await fetchText(source);
+      const values = LOTS.map(lot => parseLot(text, lot.key));
+      if (values.every(Boolean)) return values;
+      throw new Error('回傳內容找不到指定停車場');
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error('無法取得即時資料');
+}
+
+function saveCache(values) {
+  try {
+    localStorage.setItem('parking-cache', JSON.stringify({
+      at: Date.now(),
+      values
+    }));
+  } catch (_) {}
+}
+
+function readCache() {
+  try {
+    const x = JSON.parse(localStorage.getItem('parking-cache'));
+    if (!x || !Array.isArray(x.values) || x.values.length !== 3) return null;
+    return x;
+  } catch (_) {
+    return null;
+  }
+}
+
+function setValue(id, value) {
+  const el = $(id);
+  el.classList.remove('loading');
+  el.textContent = value.free === '以現場為準' ? '以現場為準' : value.free + ' 格';
+}
+
+function setLoading() {
+  LOTS.forEach(lot => {
+    const el = $(lot.id);
+    el.classList.add('loading');
+    el.textContent = '讀取中…';
+  });
+}
+
+function formatTime(ms) {
+  return new Date(ms).toLocaleTimeString('zh-TW', {
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+async function update() {
+  const btn = $('refresh');
+  btn.disabled = true;
+  btn.textContent = '更新中…';
+  $('meta').className = 'meta';
+  $('meta').textContent = '正在更新資料…';
+  setLoading();
+
+  try {
+    const values = await getLiveData();
+    LOTS.forEach((lot, i) => setValue(lot.id, values[i]));
+    const now = Date.now();
+    saveCache(values);
+    $('meta').textContent = '更新時間：' + formatTime(now);
+  } catch (err) {
+    const cached = readCache();
+    if (cached) {
+      LOTS.forEach((lot, i) => setValue(lot.id, cached.values[i]));
+      $('meta').className = 'meta error';
+      $('meta').textContent = '即時更新失敗，顯示上次資料（' + formatTime(cached.at) + '）';
+    } else {
+      LOTS.forEach(lot => {
+        const el = $(lot.id);
+        el.classList.remove('loading');
+        el.textContent = '—';
+      });
+      $('meta').className = 'meta error';
+      $('meta').textContent = '更新失敗，請按一次「重新整理 / 更新資料」';
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '重新整理 / 更新資料';
+  }
+}
+
+$('refresh').addEventListener('click', update);
+update();
+</script>
+</body>
+</html>
