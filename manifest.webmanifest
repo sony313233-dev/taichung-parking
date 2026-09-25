@@ -1,0 +1,8 @@
+{
+  "name": "七期停車",
+  "short_name": "七期停車",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f4f4f6",
+  "theme_color": "#f4f4f6"
+}
